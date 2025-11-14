@@ -1,4 +1,4 @@
-// src/services/api.js
+// src/services/api.js - VERSÃO COM FALLBACK
 import axios from 'axios';
 import AuthService from './authService';
 
@@ -7,18 +7,27 @@ const API_BASE_URL = import.meta.env.VITE_API_URL;
 const api = axios.create({
   baseURL: API_BASE_URL,
   timeout: 10000,
-  withCredentials: true,
+  withCredentials: true, // ✅ Mantém para cookies
 });
 
-// === INTERCEPTOR: Remove Content-Type quando for FormData ===
+// === REQUEST INTERCEPTOR COM FALLBACK ===
 api.interceptors.request.use(config => {
+  // Remove Content-Type para FormData
   if (config.data instanceof FormData) {
-    delete config.headers['Content-Type']; // Deixa o Axios definir com boundary
+    delete config.headers['Content-Type'];
   }
+  
+  // ✅ ADICIONE: Se tiver token no localStorage, usa como fallback
+  const storedToken = AuthService.getStoredAccessToken();
+  if (storedToken && !config.headers['Authorization']) {
+    config.headers['Authorization'] = `Bearer ${storedToken}`;
+    console.log('🔐 Usando token do localStorage como fallback');
+  }
+  
   return config;
 }, error => Promise.reject(error));
 
-// === RESPONSE INTERCEPTOR (mantido) ===
+// === RESPONSE INTERCEPTOR COM FALLBACK ===
 api.interceptors.response.use(
   response => response.data,
   async error => {
@@ -26,27 +35,24 @@ api.interceptors.response.use(
 
     if (!error.response) return Promise.reject(error);
 
+    // ✅ SE for 401, tenta refresh token
     if (error.response.status === 401 && !originalRequest._retry) {
-      if (isRefreshing) {
-        return new Promise((resolve, reject) => {
-          failedQueue.push({ resolve, reject });
-        })
-          .then(() => api(originalRequest))
-          .catch(err => Promise.reject(err));
-      }
-
       originalRequest._retry = true;
-      isRefreshing = true;
 
       try {
         await AuthService.refreshToken();
-        processQueue(null);
+        
+        // ✅ DEPOIS do refresh, atualiza o header com novo token (se disponível)
+        const newToken = AuthService.getStoredAccessToken();
+        if (newToken) {
+          originalRequest.headers['Authorization'] = `Bearer ${newToken}`;
+        }
+        
         return api(originalRequest);
       } catch (refreshError) {
-        processQueue(refreshError);
+        AuthService.clearAuthSilently();
+        window.location.href = '/login';
         return Promise.reject(refreshError);
-      } finally {
-        isRefreshing = false;
       }
     }
 
@@ -54,15 +60,5 @@ api.interceptors.response.use(
     return Promise.reject(new Error(message));
   }
 );
-
-let isRefreshing = false;
-let failedQueue = [];
-
-const processQueue = (error, token = null) => {
-  failedQueue.forEach(prom => {
-    error ? prom.reject(error) : prom.resolve(token);
-  });
-  failedQueue = [];
-};
 
 export default api;
